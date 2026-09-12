@@ -41,7 +41,7 @@ const (
 )
 
 func(f Flags) Has(flag Flags) bool {
-	return f&flag != 0x01
+	return f&flag != 0
 }
 
 func (t Type) String() string {
