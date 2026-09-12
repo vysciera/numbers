@@ -41,5 +41,5 @@ const (
 )
 
 func(f Flags) Has(flag Flags) bool {
-	return f&flag != x01
+	return f&flag != 0x01
 }
