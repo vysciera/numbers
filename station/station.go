@@ -6,6 +6,7 @@ import (
 
 	"numbers/protocol"
 	"numbers/transmission"
+	"numbers/transport"
 )
 
 type Station struct {
@@ -36,7 +37,22 @@ func now() uint64 {
 	return uint64(time.Now().UnixMilli())
 }
 
-func (s *Station) Beacon() (protocol.Packet, error) {
+func (s *Station) emit(sender transport.Sender, packet protocol.Packet) (protocol.Packet, error) {
+	raw, err := protocol.Encode(packet)
+	if err != nil {
+		return protocol.Packet{}, err
+	}
+
+	if err := sender.Send(raw); err != nil {
+		return protocol.Packet{}, err
+	}
+
+	s.commitSequence(packet.Sequence)
+
+	return packet, nil
+}
+
+func (s *Station) EmitBeacon(sender transport.Sender) (protocol.Packet, error) {
 	sequence := s.candidateSequence()
 
 	packet, err := protocol.NewBeacon(s.ID, sequence, now())
@@ -44,12 +60,10 @@ func (s *Station) Beacon() (protocol.Packet, error) {
 		return protocol.Packet{}, err
 	}
 
-	s.commitSequence(sequence)
-	
-	return packet, nil
+	return s.emit(sender, packet)
 }
 
-func (s *Station) Packet(frame transmission.Frame) (protocol.Packet, error) {
+func (s *Station) EmitFrame(sender transport.Sender, frame transmission.Frame) (protocol.Packet, error) {
 	sequence := s.candidateSequence()
 	timestamp := now()
 
@@ -60,7 +74,7 @@ func (s *Station) Packet(frame transmission.Frame) (protocol.Packet, error) {
 
 	switch frame.Type {
 	case protocol.TypePreamble:
-		packet, err =  protocol.NewPreamble(
+		packet, err = protocol.NewPreamble(
 			s.ID,
 			frame.Count,
 			frame.TransmissionID,
@@ -73,8 +87,6 @@ func (s *Station) Packet(frame transmission.Frame) (protocol.Packet, error) {
 			return protocol.Packet{}, errors.New("message frame has no number group")
 		}
 
-		repeated := frame.Flags.Has(protocol.FlagRepeated)
-
 		packet, err = protocol.NewMessage(
 			s.ID,
 			frame.Count,
@@ -83,7 +95,7 @@ func (s *Station) Packet(frame transmission.Frame) (protocol.Packet, error) {
 			sequence,
 			timestamp,
 			*frame.Group,
-			repeated,
+			frame.Flags.Has(protocol.FlagRepeated),
 		)
 
 	case protocol.TypeRepeat:
@@ -105,14 +117,14 @@ func (s *Station) Packet(frame transmission.Frame) (protocol.Packet, error) {
 		)
 
 	default:
-		return protocol.Packet{}, errors.New("unsupported transmission frame")
+		return protocol.Packet{},
+		errors.New("unsupported tnansmission frame")
 	}
 
 	if err != nil {
 		return protocol.Packet{}, err
 	}
 
-	s.commitSequence(sequence)
-
-	return packet, nil
+	return s.emit(sender, packet)
 }
+
