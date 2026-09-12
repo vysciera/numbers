@@ -49,6 +49,7 @@ func NewMessage(stationID, count, index uint16, transmissionID, sequence uint32,
 		Sequence: sequence,
 		TransmissionID:	transmissionID,
 		Index:	index,
+		Count:	count,
 		Timestamp:	timestamp,
 		Payload:	EncodeNumberGroup(group),
 	}

@@ -54,10 +54,16 @@ func Encode(p Packet) ([]byte, error) {
 		p.Index,
 	)
 
-	// 22..29 - timestamp
+	// 20..21
 	binary.BigEndian.PutUint16(
 		buf[20:22],
 		p.Count,
+	)
+
+	// 22..29 - timestamp
+	binary.BigEndian.PutUint64(
+		buf[22:30],
+		p.Timestamp,
 	)
 
 	// 30..31 - payload length
