@@ -20,14 +20,16 @@ func main() {
 	}
 	defer udp.Close()
 
-	s, err := station.New(17)
+	const statePath = "var/station.json"
+
+	s, err := station.Open(statePath, 17)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	fmt.Printf(
 		"station %04d transmitting to %s\n\n",
-		s.ID, address,
+		s.ID(), address,
 	)
 
 	packet, err := s.EmitBeacon(udp)
@@ -39,8 +41,13 @@ func main() {
 
 	time.Sleep(2 * time.Second)
 
+	transmissionID, err := s.NextTransmissionID()
+	if err != nil {
+		log.Fatal(err)
+	}
+
 	tx := transmission.Transmission{
-		ID: 481,
+		ID: transmissionID,
 
 		Groups: []protocol.NumberGroup{
 			{418, 992, 117, 4, 731},

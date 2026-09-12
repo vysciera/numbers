@@ -1,7 +1,10 @@
-package station
+package station 
 
 import (
 	"errors"
+	"fmt"
+	"os"
+	"sync"
 	"time"
 
 	"numbers/protocol"
@@ -10,121 +13,210 @@ import (
 )
 
 type Station struct {
-	ID uint16
+	mu sync.Mutex
 
-	sequence uint32
+	path	string
+	state	State
 }
 
-func New(id uint16) (*Station, error) {
-	if id == 0 {
-		return nil, errors.New("station ID 0 is reserved")
+func Open(path string, stationID uint16) (*Station, error) {
+	state, err := loadState(path)
+
+	switch {
+		case err == nil:
+			if state.StationID != stationID {
+				return nil, fmt.Errorf(
+					"state belongs to station %d, not station %d",
+					state.StationID, stationID,
+				)
+			}
+
+			state.Starts++
+			state.LastStartedAt=time.Now().UTC()
+
+		case errors.Is(err, os.ErrNotExist):
+			state, err = newState(stationID)
+			if err != nil {
+				return nil, err
+			}
+
+		default:
+			return nil, err
+	}
+
+	if err := saveState(path, state); err != nil {
+		return nil, err
 	}
 
 	return &Station{
-		ID: id,
+		path:	path,
+		state:	state,
 	}, nil
 }
 
+func (s *Station) ID() uint16 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state.StationID
+}
+
+func (s *Station) Epoch() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state.Epoch
+}
+
+func (s *Station) Snapshot() State {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.state
+}
+
 func (s *Station) candidateSequence() uint32 {
-	return s.sequence + 1
+	return s.state.Sequence + 1
 }
 
-func (s *Station) commitSequence(sequence uint32) {
-	s.sequence = sequence
+func (s *Station) reserveSequence(sequence uint32) error {
+	old := s.state.Sequence
+	s.state.Sequence = sequence
+
+	if err := saveState(s.path, s.state); err != nil {
+		s.state.Sequence = old
+		return err
+	}
+
+	return nil
 }
 
-func now() uint64 {
-	return uint64(time.Now().UnixMilli())
+func (s *Station) NextTransmissionID() (uint32, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	next := s.state.Transmission + 1
+
+	if next == 0 {
+		next = 1
+	}
+
+	old := s.state.Transmission
+	s.state.Transmission = next
+
+	if err := saveState(s.path, s.state); err != nil {
+		s.state.Transmission = old
+		return 0, err
+	}
+
+	return next, nil
 }
 
-func (s *Station) emit(sender transport.Sender, packet protocol.Packet) (protocol.Packet, error) {
+func (s *Station) emitLocked(sender transport.Sender, packet protocol.Packet) (protocol.Packet, error) {
 	raw, err := protocol.Encode(packet)
 	if err != nil {
 		return protocol.Packet{}, err
 	}
 
-	if err := sender.Send(raw); err != nil {
-		return protocol.Packet{}, err
+	if err := s.reserveSequence(packet.Sequence); err != nil {
+		return protocol.Packet{}, fmt.Errorf(
+			"reserve sequence %d: %w",
+			packet.Sequence, err,
+		)
 	}
 
-	s.commitSequence(packet.Sequence)
+	if err := sender.Send(raw); err != nil {
+		return packet, fmt.Errorf(
+			"emit sequence %d: %w",
+			packet.Sequence, err,
+		)
+	}
 
 	return packet, nil
 }
 
 func (s *Station) EmitBeacon(sender transport.Sender) (protocol.Packet, error) {
-	sequence := s.candidateSequence()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	packet, err := protocol.NewBeacon(s.ID, sequence, now())
+	sequence := s.candidateSequence()
+	packet, err := protocol.NewBeacon(
+		s.state.StationID, sequence,
+		uint64(time.Now().UnixMilli()),
+	)
+	
 	if err != nil {
 		return protocol.Packet{}, err
 	}
 
-	return s.emit(sender, packet)
+	return s.emitLocked(sender, packet)
 }
 
 func (s *Station) EmitFrame(sender transport.Sender, frame transmission.Frame) (protocol.Packet, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	sequence := s.candidateSequence()
-	timestamp := now()
+	timestamp := uint64(time.Now().UnixMilli())
 
 	var (
-		packet protocol.Packet
-		err	   error
+		packet	protocol.Packet
+		err		error
 	)
 
 	switch frame.Type {
-	case protocol.TypePreamble:
-		packet, err = protocol.NewPreamble(
-			s.ID,
-			frame.Count,
-			frame.TransmissionID,
-			sequence,
-			timestamp,
-		)
+		case protocol.TypePreamble:
+			packet, err = protocol.NewPreamble(
+				s.state.StationID,
+				frame.Count,
+				frame.TransmissionID,
+				sequence,
+				timestamp,
+			)
 
-	case protocol.TypeMessage:
-		if frame.Group == nil {
-			return protocol.Packet{}, errors.New("message frame has no number group")
-		}
+		case protocol.TypeMessage:
+			if frame.Group == nil {
+				return protocol.Packet{},
+				errors.New("message frame has no number group")
+			}
 
-		packet, err = protocol.NewMessage(
-			s.ID,
-			frame.Count,
-			frame.Index,
-			frame.TransmissionID,
-			sequence,
-			timestamp,
-			*frame.Group,
-			frame.Flags.Has(protocol.FlagRepeated),
-		)
+			packet, err = protocol.NewMessage(
+				s.state.StationID,
+				frame.Count,
+				frame.Index,
+				frame.TransmissionID,
+				sequence,
+				timestamp,
+				*frame.Group,
+				frame.Flags.Has(protocol.FlagRepeated),
+			)
 
-	case protocol.TypeRepeat:
-		packet, err = protocol.NewRepeat(
-			s.ID,
-			frame.Count,
-			frame.TransmissionID,
-			sequence,
-			timestamp,
-		)
+		case protocol.TypeRepeat:
+			packet, err = protocol.NewRepeat(
+				s.state.StationID,
+				frame.Count,
+				frame.TransmissionID,
+				sequence,
+				timestamp,
+			)
 
-	case protocol.TypeTerminator:
-		packet, err = protocol.NewTerminator(
-			s.ID,
-			frame.Count,
-			frame.TransmissionID,
-			sequence,
-			timestamp,
-		)
+		case protocol.TypeTerminator:
+			packet, err = protocol.NewTerminator(
+				s.state.StationID,
+				frame.Count,
+				frame.TransmissionID,
+				sequence,
+				timestamp,
+			)
 
-	default:
-		return protocol.Packet{},
-		errors.New("unsupported tnansmission frame")
+		default:
+			return protocol.Packet{},
+			errors.New("unsupported transmission frame")
 	}
 
 	if err != nil {
 		return protocol.Packet{}, err
 	}
 
-	return s.emit(sender, packet)
+	return s.emitLocked(sender, packet)
 }
-

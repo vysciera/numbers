@@ -2,4 +2,6 @@ transport/udp_listener.go
 protocol/decode.go
 receiver/
 
+var/
+
 .DS_Store
