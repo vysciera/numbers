@@ -43,3 +43,20 @@ const (
 func(f Flags) Has(flag Flags) bool {
 	return f&flag != 0x01
 }
+
+func (t Type) String() string {
+	switch t {
+	case TypeBeacon:
+		return "BEACON"
+	case TypePreamble:
+		return "PREAMBLE"
+	case TypeMessage:
+		return "MESSAGE"
+	case TypeRepeat:
+		return "REPEAT"
+	case TypeTerminator:
+		return "TERMINATOR"
+	default:
+		return "UNKNOWN"
+	}
+}
